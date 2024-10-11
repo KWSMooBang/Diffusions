@@ -11,30 +11,31 @@ class DenoiseDiffusion:
             self,
             eps_model: nn.Module,
             n_steps: int,
+            device: torch.device
     ):
         super(DenoiseDiffusion, self).__init__()
         
         self.eps_model = eps_model
         self.n_steps = n_steps
-        self.beta = torch.linspace(0.0001, 0.02, n_steps)
+        self.beta = torch.linspace(0.0001, 0.02, n_steps).to(device)
         self.alpha = 1. - self.beta
-        self.alpha_bar = torch.cumprod(self.alpha, dim=0)
+        self.alpha_bar = torch.cumprod(self.alpha, dim=0).to(device)
         self.sigma2 = self.beta
 
     def q_sample(self, x_0: torch.Tensor, t: torch.Tensor, eps: Optional[torch.Tensor] = None):
         if eps is None:
             eps = torch.randn_like(x_0)
         
-        mean = self._gather(self.alpha_bar, t) ** 0.5 * x_0
+        mean = (self._gather(self.alpha_bar, t) ** 0.5) * x_0
         var = 1 - self._gather(self.alpha_bar, t)
 
         return mean + (var ** 0.5) * eps
 
     def p_sample(self, x_t: torch.Tensor, t: torch.Tensor):
         eps_theta = self.eps_model(x_t, t)
-        alpha_bar = self._gather(self,alpha_bar, t)
+        alpha_bar = self._gather(self.alpha_bar, t)
         alpha = self._gather(self.alpha, t)
-        eps_coef = (1 - alpha) / (1 - alpha_bar) ** 0.5
+        eps_coef = (1 - alpha) / ((1 - alpha_bar) ** 0.5)
 
         mean = 1 / (alpha ** 0.5) * (x_t - eps_coef * eps_theta)
         var = self._gather(self.sigma2, t)
