@@ -162,6 +162,6 @@ cython_debug/
 #.idea/
 
 # datasets
-.datasets/celeba
-.datasets/cifar10
-.datasets/lsun
+datasets/celeba
+datasets/cifar10
+datasets/lsun
