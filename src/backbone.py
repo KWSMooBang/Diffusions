@@ -20,7 +20,7 @@ class TimeEmbedding(nn.Module):
             nn.Linear(self.n_channels, self.n_channels)
         )
 
-    def fowrad(self, t: torch.Tensor):
+    def forward(self, t: torch.Tensor):
         """
         Args:
             t: position values which has shape [height * width]
@@ -76,8 +76,8 @@ class ResidualBlock(nn.Module):
             t: time embedding which has shape [batch_size, time_channels]
         """
         h = self.conv1(x)
-        h += self.time(t)
-        h = self.conv2(x)
+        h += self.time(t)[:, :, None, None]
+        h = self.conv2(h)
 
         return h + self.residual(x)
 
@@ -96,31 +96,31 @@ class AttentionBlock(nn.Module):
             d_k = n_channels
 
         self.norm = nn.GroupNorm(n_groups, n_channels)
-        self.proj = nn.Lienar(n_channels, n_heads * d_k * 3)
+        self.proj = nn.Linear(n_channels, n_heads * d_k * 3)
         self.linear = nn.Linear(n_heads * d_k, n_channels)
         self.scale = d_k ** -0.5
 
         self.n_heads = n_heads
         self.d_k = d_k
 
-    def forward(self, x: torch.Tensor, t: Optional[torch.Tensor]):
+    def forward(self, x: torch.Tensor, t: Optional[torch.Tensor] = None):
         """
         Args:
             x: input which has shape [batch_size, in_channels, height, width]
             t: time embedding which has shape [batch_size, time_channels]
         """
         batch_size, n_channels, height, width = x.shape
-        x = x.view(batch_size, n_channels, -1).permute(0, 2, 1)    # [batch_size, height*width, n_channels]
-        qkv = self.proj(x).view(batch_size, -1, self.n_heads, 3 * self.d_k)    # [batch_size, height*width, n_heads, d_k * 3]
+        x = x.reshape(batch_size, n_channels, -1).permute(0, 2, 1)    # [batch_size, height*width, n_channels]
+        qkv = self.proj(x).reshape(batch_size, -1, self.n_heads, 3 * self.d_k)    # [batch_size, height*width, n_heads, d_k * 3]
         q, k, v = torch.chunk(qkv, 3, dim=-1)    # [batch_size, height*width, n_heads, d_k]
         attn = torch.einsum('bihd,bjhd->bijh', q, k) * self.scale    # [batch_size, height*width, height*width, n_heads]
         attn = attn.softmax(dim=2)
         h = torch.einsum('bijh,bjhd->bihd', attn, v)    # [batch_size, height*width, n_heads, d_k]
-        h = h.view(batch_size, -1, self.n_heads * self.d_k)     # [batch_size. height_width, n_head * d_k]
+        h = h.reshape(batch_size, -1, self.n_heads * self.d_k)     # [batch_size. height_width, n_head * d_k]
         h = self.linear(h)    # [batch_size, height*width, n_channels]
 
         h += x
-        h = h.permute(0, 2, 1).view(batch_size, n_channels, height, width)
+        h = h.permute(0, 2, 1).reshape(batch_size, n_channels, height, width)
 
         return h
     
@@ -259,7 +259,7 @@ class UNet(nn.Module):
         self.up = nn.ModuleList(up)
 
         self.head = nn.Sequential(
-            nn.GroupNorm(num_groups=8, n_channels),
+            nn.GroupNorm(8, in_channels),
             nn.SiLU(),
             nn.Conv2d(in_channels, image_channels, kernel_size=3, padding=1)
         )
