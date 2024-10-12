@@ -109,18 +109,19 @@ class AttentionBlock(nn.Module):
             x: input which has shape [batch_size, in_channels, height, width]
             t: time embedding which has shape [batch_size, time_channels]
         """
-        batch_size, n_channels, height, width = x.shape
-        x = x.reshape(batch_size, n_channels, -1).permute(0, 2, 1)    # [batch_size, height*width, n_channels]
-        qkv = self.proj(x).reshape(batch_size, -1, self.n_heads, 3 * self.d_k)    # [batch_size, height*width, n_heads, d_k * 3]
-        q, k, v = torch.chunk(qkv, 3, dim=-1)    # [batch_size, height*width, n_heads, d_k]
-        attn = torch.einsum('bihd,bjhd->bijh', q, k) * self.scale    # [batch_size, height*width, height*width, n_heads]
+        b, c, h, w = x.shape
+        x = self.norm(x)
+        x = x.reshape(b, c, -1).permute(0, 2, 1)    # [b, hw, c]
+        qkv = self.proj(x).reshape(b, -1, self.n_heads, 3 * self.d_k)    # [b, hw, n_heads, d_k * 3]
+        q, k, v = torch.chunk(qkv, 3, dim=-1)    # [b, hw, n_heads, d_k]
+        attn = torch.einsum('bihd,bjhd->bijh', q, k) * self.scale    # [b, hw, hw, n_heads]
         attn = attn.softmax(dim=2)
-        h = torch.einsum('bijh,bjhd->bihd', attn, v)    # [batch_size, height*width, n_heads, d_k]
-        h = h.reshape(batch_size, -1, self.n_heads * self.d_k)     # [batch_size. height_width, n_head * d_k]
-        h = self.linear(h)    # [batch_size, height*width, n_channels]
+        h = torch.einsum('bijh,bjhd->bihd', attn, v)    # [b, hw, n_heads, d_k]
+        h = h.reshape(b, -1, self.n_heads * self.d_k)     # [b. hw, n_head * d_k]
+        h = self.linear(h)    # [b, hw, n_channels]
 
         h += x
-        h = h.permute(0, 2, 1).reshape(batch_size, n_channels, height, width)
+        h = h.permute(0, 2, 1).reshape(b, c, h, w)
 
         return h
     
