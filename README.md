@@ -10,4 +10,5 @@ Pytorch Implementation of various kinds of diffusion models
 [1] https://github.com/hojonathanho/diffusion  
 [2] https://github.com/labmlai/annotated_deep_learning_paper_implementations  
 [3] https://github.com/lucidrains/denoising-diffusion-pytorch  
-[4] 
+[4] https://github.com/CompVis/latent-diffusion  
+[5] https://github.com/compvis/stable-diffusion
