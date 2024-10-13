@@ -67,7 +67,7 @@ class BERTEmbedder(AbstractEncoder):
         if self.use_tokenizer:
             self.tokenizer = BERTTokenizer(vq_interface=False, max_length=max_seq_len)
         self.device = device
-        self.transformer = TransformerWrapper(num_tokens=vocab_size, max_seq_len=max_mem_len=,
+        self.transformer = TransformerWrapper(num_tokens=vocab_size, max_seq_len=max_seq_len,
                                               attn_layers=Encoder(dim=n_embed, depth=n_layer),
                                               emb_dropout=embedding_dropout)
 
