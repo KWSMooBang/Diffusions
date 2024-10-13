@@ -21,7 +21,8 @@ class TransformerEmbedder(AbstractEncoder):
     def __init__(self, n_embed, n_layer, vocab_size, max_seq_len=77, device='cuda'):
         super().__init__()
         self.device = device
-        self.transformer = None
+        self.transformer = TransformerWrapper(num_tokens=vocab_size, max_seq_len=max_seq_len,
+                                              attn_layers=Encoder(dim=n_embed, depth=n_layer))
 
     def forward(self, tokens):
         tokens = tokens.to(self.device)
