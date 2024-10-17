@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 from ldm.modules.attention import LinearAttention
+from ldm.modules.distribution import DiagonalGaussianDistribution
 
 
 def get_timestep_embedding(timesteps, embedding_dim):
