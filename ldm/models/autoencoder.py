@@ -11,6 +11,31 @@ from ldm.modules.distribution import GaussianDistribution
 from ldm.util import instantiate_from_config
 
 
+class Autoencoder(nn.Module):
+    def __init__(
+        self,
+        encoder: Encoder,
+        decoder: Decoder,
+        embed_channels: int,
+        latent_channels: int
+    ):
+        super().__init__()
+        
+        self.encoder = encoder
+        self.decoder = decoder
+        self.quant_conv = nn.Conv2d(2 * latent_channels, 2 * embed_channels, kernel_size=1)
+        self.post_quant_conv = nn.Conv2d(embed_channels, latent_channels, kernel_size=1)
+
+    def encode(self, image: torch.Tensor) -> GaussianDistribution:
+        z = self.encoder(image)
+        moments = self.quant_conv(z)
+        return GaussianDistribution(moments)
+
+    def decode(self, z: torch.Tensor):
+        z = self.post_quant_conv(z)
+        return self.decoder(z)
+
+
 class VQModel(pl.LightningModule):
     def __init__(
         self,
@@ -157,32 +182,4 @@ class VQModel(pl.LightningModule):
                                                                 last_layer=self.get_last_layer(), split='train')
             self.log_dict(log_dict_disc, prog_bar=False, logger=True, on_step=True, on_epoch=True)
             return discloss
-
-
-class Autoencoder(nn.Module):
-    def __init__(
-        self,
-        encoder: Encoder,
-        decoder: Decoder,
-        embed_channels: int,
-        latent_channels: int
-    ):
-        super().__init__()
-        
-        self.encoder = encoder
-        self.decoder = decoder
-        self.quant_conv = nn.Conv2d(2 * latent_channels, 2 * embed_channels, kernel_size=1)
-        self.post_quant_conv = nn.Conv2d(embed_channels, latent_channels, kernel_size=1)
-
-    def encode(self, image: torch.Tensor) -> GaussianDistribution:
-        z = self.encoder(image)
-        moments = self.quant_conv(z)
-        return GaussianDistribution(moments)
-
-    def decode(self, z: torch.Tensor):
-        z = self.post_quant_conv(z)
-        return self.decoder(z)
-
-
-
         
