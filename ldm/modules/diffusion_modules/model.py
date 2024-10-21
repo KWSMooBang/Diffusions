@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from typing import List
 from einops import rearrange
 from torch import nn
 from ldm.modules.attention import LinearAttention
@@ -73,7 +74,7 @@ class ResnetBlock(nn.Module):
         in_channels, 
         out_channels=None, 
         conv_shortcut=False,
-        dropout,
+        dropout=0.0,
         temb_channels=512    
     ):
         super().__init__()
@@ -133,41 +134,34 @@ class LinearAttentionBlock(LinearAttention):
 
 
 class AttentionBlock(nn.Module):
-    def __init__(self, in_channels):
+    def __init__(self, channels: int):
         super().__init__()
-        self.in_channels = in_channels
 
-        self.norm = Normalize(in_channels)
-        self.q = nn.Conv2d(in_channels, in_channels,
-                           kernel_size=1, stride=1, padding=0)
-        self.k = nn.Conv2d(in_channels, in_channels,
-                           kernel_size=1, stride=1, padding=0)
-        self.v = nn.Conv2d(in_channels, in_channels,
-                           kernel_size=1, stride=1, padding=0)
-        self.proj = nn.Conv2d(in_channels, in_channels,
-                                  kernel_size=1, stride=1, padding=0)
+        self.norm = Normalize(channels)
+        self.q = nn.Conv2d(channels, channels, kernel_size=1)
+        self.k = nn.Conv2d(channels, channels, kernel_size=1)
+        self.v = nn.Conv2d(channels, channels, kernel_size=1)
+        self.proj_out = nn.Conv2d(channels, channels, kernel_size=1)
+        self.scale = channels ** -0.5
         
     def forward(self, x):
-        h = x
-        h = self.norm(h)
-        q = self.q(h)
-        k = self.k(h)
-        v = self.v(h)
+        x_norm = self.norm(x)
+        q = self.q(x_norm)
+        k = self.k(x_norm)
+        v = self.v(x_norm)
 
         b, c, h, w = x.shape
         q = q.reshape(b, c, h*w)
-        q = q.permute(0, 2, 1)  # [b, hw, c]
         k = k.reshape(b, c, h*w)
-        attn = torch.bmm(q, k)  # [b, hw(q), hw(k)]
-        attn = attn * (int(c) ** (-0.5))
+        v = v.reshape(b, c, h*w)
+
+        attn = torch.einsum('bci,bcj->bij', q, k)  * self.scale # [b, hw(q), hw(k)]
         attn = F.softmax(attn, dim=2)
 
-        v = v.reshape(b, c, h*w)
-        attn = attn.permute(0, 2, 1)  # [b, hw(k), hw(q)]
-        out = torch.bmm(v, attn)  # [b, c, hw(q)]
+        out = torch.einsum('bij,bcj->bci', attn, v)  # [b, c, hw(q)]
         out = out.reshape(b, c, h, w)
 
-        out = self.proj(out)
+        out = self.proj_out(out)
 
         return x + out
 
@@ -344,222 +338,130 @@ class UNet(nn.Module):
 
 class Encoder(nn.Module):
     def __init__(
-        self,
+        self, 
         *,
-        channels,
-        out_channels,
-        channel_multiplier=(1, 2, 4, 8),
-        num_res_blocks,
-        attn_resolution, 
-        dropout=0.0,
-        resample_with_conv=True,
-        in_channels,
-        resolution,
-        z_channels, 
-        double_z=True,
-        use_linear_attn=False,
-        attn_type='vanilla',
-        **ignore_kwargs        
+        channels: int,
+        channel_multiplier: List[int],
+        n_resnet_blocks: int,
+        in_channels: int,
+        latent_channels: int
     ):
         super().__init__()
-        if use_linear_attn:
-            attn_type = 'linear'
-        self.channels = channels,
-        self.temb_channels = 0
-        self.num_resolutions = len (channel_multiplier)
-        self.num_res_blocks = num_res_blocks
-        self.in_channels = in_channels 
 
-        # Downsampling Layer
-        self.conv_in = nn.Conv2d(in_channels, self.channels, kernel_size=3, stride=1, padding=1)
+        n_resolutions = len(channel_multiplier)
+        channels_list = [m * channels for m in [1] + channel_multiplier]
 
-        current_resolution = resolution
-        in_channel_multiplier = (1, ) + tuple(channel_multiplier)
-        self.in_channel_multiplier = in_channel_multiplier
+        self.conv_in = nn.Conv2d(in_channels, channels, kernel_size=3, stride=1, padding=1)
+
+        # Downsample Layers
         self.down = nn.ModuleList()
-        for i in range(self.num_resolutions):
-            block = nn.ModuleList()
-            attn = nn.ModuleList()
-            block_in = channels * in_channel_multiplier[i]
-            block_out = channels * channel_multiplier[i]
-            for j in range(self.num_res_blocks):
-                block.append(
-                    ResnetBlock(in_channels=block_in,
-                                        out_channels=block_out,
-                                        temb_channels=self.temb_channels,
-                                        dropout=dropout
-                    )
-                )
-                block_in = block_out
-                if current_resolution in attn_resolution:
-                    attn.append(make_attn(block_in, attn_type=attn_type))
+        for i in range(n_resolutions):
+            resnet_blocks = nn.ModuleList()
+            for _ in range(n_resnet_blocks):
+                resnet_blocks.append(ResnetBlock(channels, channels_list[i + 1]))
+                channels  = channels_list[i + 1]
             down = nn.Module()
-            down.block = block
-            down.attn = attn
-            if i != self.num_resolutions - 1:
-                down.downsample = Downsample(block_in, resample_with_conv)
-                current_resolution = current_resolution // 2
+            down.block = resnet_blocks
+            if i != n_resolutions - 1:
+                down.downsample = Downsample(channels)
+            else:
+                down.downsample = nn.Identity()
+
             self.down.append(down)
         
-        # Middle Layer
+        # Middle Layers
         self.middle = nn.Module()
-        self.middle.block_1 = ResnetBlock(in_channels=block_in,
-                                                               out_channels=block_in,
-                                                               temb_channels=self.temb_channels,
-                                                               dropout=dropout)
-        self.middle.attn_1 = make_attn(block_in, attn_type=attn_type)
-        self.middle.block_2 = ResnetBlock(in_channels=block_in,
-                                                               out_channels=block_in,
-                                                               temb_channels=self.temb_channels,
-                                                               dropout=dropout)
-
-        # Head Layer
-        self.norm_out =Normalize(block_in)
-        self.activation = Swish()
-        self.conv_out = nn.Conv2d(block_in, z_channels*2 if double_z else z_channels, kernel_size=3, stride=1, padding=1)
-
-    def forward(self, x):
-        temb = None
-
-        # Downsampling
-        hs = [self.conv_in(x)]
-        for i in range(self.num_resolutions):
-            for j in range(self.num_res_blocks):
-                h = self.down[i].block[j](h)
-                if len(self.down[i].attn) > 0:
-                    h = self.down[i].attn[j](h)
-                hs.append(h)
-            if i != self.num_resolutions - 1:
-                hs.append(self.down[i].downsample(hs[-1]))
+        self.middle.block_1 = ResnetBlock(channels, channels)
+        self.middle.attn = AttentionBlock(channels)
+        self.middle.block_2 = ResnetBlock(channels, channels)
         
-        # Middle
-        h = hs[-1]
-        h = self.middle.block_1(h, temb)
-        h = self.middle.attn_1(h)
-        h = self.middle.block_2(h, temb)
+        # Head Layers
+        self.norm_out = Normalize(channels)
+        self.activation_out =Swish()
+        self.conv_out = nn.Conv2d(channels, 2 * latent_channels, kernel_size=3, stride=1, padding=1)
 
-        # Head
-        h = self.norm_out(h)
-        h = self.activation(h)
-        h = self.conv_out(h)
+    def forward(self, image: torch.Tensor):
+        x = self.conv_in(image)
 
-        return h
+        for down in self.down:
+            for block in down.block:
+                x = block(x)
+            x = down.downsample(x)
+
+        x = self.middle.block_1(x)
+        x = self.middle.attn(x)
+        x = self.middle.block_2(x)
+
+        x = self.norm_out(x)
+        x = self.activation_out(x)
+        x = self.conv_out(x)
+
+        return x
     
 
 class Decoder(nn.Module):
     def __init__(
         self,
         *,
-        channels,
-        out_channels,
-        channel_multiplier=(1, 2, 4, 8),
-        num_res_blocks,
-        attn_resolutions,
-        dropout=0.0,
-        resample_with_conv=True,
-        in_channels,
-        resolution,
-        z_channels,
-        give_pre_end=False,
-        tanh_out=False,
-        use_linear_attn=False,
-        attn_type='vanilla',
-        **ignorekwargs
+        channels: int,
+        channel_multipliers: List[int],
+        n_resnet_blocks: int,
+        out_channels: int,
+        latent_channels: int
     ):
         super().__init__()
-        if use_linear_attn:
-            attn_type = ' linear'
-        self.channels = channels
-        self.temb_channels = 0
-        self.num_resolutions = len(channel_multiplier)
-        self.num_res_block = num_res_blocks
-        self.resolution = resolution
-        self.in_channels = in_channels
-        self.give_pre_end = give_pre_end
-        self.tanh_out = tanh_out
-
-        in_channel_multiplier = (1, ) + tuple(channel_multiplier)
-        block_in = channels * channel_multiplier[self.num_resolutions - 1]
-        current_resolution = resolution // 2 ** (self.num_resolutions - 1)
-        self.z_shape =  (1, z_channels, current_resolution, current_resolution)
-        print(f"Working with z of shape {self.z_shape} = {np.prod(self.z_shape)}")
+        
+        n_resolutions = len(channel_multipliers)
+        channels_list = [m * channels for m in channel_multipliers]
+        channels = channels_list[-1]
 
         # z to block_in
-        self.conv_in = nn.Conv2d(z_channels, block_in, kernel_size=3, stride=1, padding=1)
+        self.conv_in = nn.Conv2d(latent_channels, channels, kernel_size=3, stride=1, padding=1)
 
         # Middle Layer
         self.middle = nn.Module()
-        self.middle.block_1 = ResnetBlock(in_channels=block_in,
-                                                               out_channels=block_in,
-                                                               temb_channels=self.temb_channels,
-                                                               dropout=dropout)
-        self.middle.attn_1 = make_attn(block_in, attn_type=attn_type)
-        self.middle.block_2 = ResnetBlock(in_channels=block_in,
-                                                               out_channels=block_in,
-                                                               temb_channels=self.temb_channels,
-                                                               dropout=dropout)
+        self.middle.block_1 = ResnetBlock(channels, channels)
+        self.middle.attn = AttentionBlock(channels)
+        self.middle.block_2 = ResnetBlock(channels)
         
         # Upsampling Layer  
         self.up = nn.ModuleList()
         for i in reversed(range(self.num_resolutions)):
-            block = nn.ModuleList()
-            attn = nn.ModuleList()
-            block_out = channels * channel_multiplier[i]
-            for j in range(self.num_res_block + 1):
-                block.append(
-                    ResnetBlock(in_channels=block_in,
-                                         out_channels=block_out,
-                                         temb_channels=self.temb_channels,
-                                         dropout=dropout)
-                )
-                block_in = block_out
-                if current_resolution in attn_resolutions:
-                    attn.append(make_attn(block_in, attn_type=attn_type))
-            up = nn.Module
-            up.block = block
-            up.attn = attn
+            resnet_blocks = nn.ModuleList()
+
+            for _ in range(n_resnet_blocks):
+                resnet_blocks.append(ResnetBlock(channels, channels_list[i]))
+                channels = channels_list[i]
+            up = nn.Module()
+            up.block = resnet_blocks
             if i != 0:
-                up.upsample = Upsample(block_in, resample_with_conv)
-                current_resolution = current_resolution * 2
+                up.upsample = Upsample(channels)
+            else: 
+                up.upsample = nn.Identity()
             self.up.insert(0, up)
         
         # Head
-        self.norm_out = Normalize(block_in)
-        self.activation = Swish()
-        self.conv_out = nn.Conv2d(block_in, out_channels, kernel_size=3, stride=1, padding=1)
+        self.norm_out = Normalize(channels)
+        self.activation_out = Swish()
+        self.conv_out = nn.Conv2d(channels, out_channels, kernel_size=3, stride=1, padding=1)
 
-    def forward(self, z):
-        self.last_z_shape = z.shape
-
-        temb = None
-
-        # z to block_in
+    def forward(self, z: torch.Tensor):
         h = self.conv_in(z)
 
-        # Middle
-        h = self.middle.block_1(h, temb)
-        h = self.middle.attn_1(h)
-        h = self.middle.block_2(h, temb)
+        h = self.middle.block_1(h)
+        h = self.middle.attn(h)
+        h = self.middle.block_2(h)
 
-        # Upsampling
-        for i in reversed(range(self.num_resolutions)):
-            for j in range(self.num_res_block + 1):
-                h = self.up[i].block[j](h, temb)
-                if len(self.up[i].attn) > 0:
-                    h = self.up[i].attn[j](h)
-            if i != 0:
-                h = self.up[i].upsample(h)
-        
-        # Head
-        if self.give_pre_end:
-            return h
-        
+        for up in reversed(self.up):
+            for block in up.block:
+                h = block(h)
+            h = h.upsample(h)
+
         h = self.norm_out(h)
-        h = self.activation(h)
-        h = self.conv_out(h)
-        if self.tanh_out:
-            h = torch.tanh(h)
-        return h
+        h = self.activation_out(h)
+        image = self.conv_out(h)
+
+        return image
     
 
 class SimpleDecoder(nn.Module):
