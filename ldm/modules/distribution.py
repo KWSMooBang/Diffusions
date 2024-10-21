@@ -20,14 +20,27 @@ class DiracDistribution(AbstractDistribution):
         return self.value
     
 
+class GaussianDistribution(AbstractDistribution):
+    def __init__(self, parameters: torch.Tensor):
+        self.mean, log_var = torch.chunk(parameters, 2, dim=1)
+        self.log_var = torch.clamp(log_var, -30.0, 20.0)
+        self.std = torch.exp(0.5 * self.log_var)
+
+    def sample(self):
+        return self.mean + self.std * torch.randn_list(self.std)
+    
+    def mode(self):
+        return self.mean
+
+
 class DiagonalGaussianDistribution(AbstractDistribution):
     def __init__(self, parameters, deterministic=False):
         self.parameters = parameters
-        self.mean, self.logvar = torch.chunk(parameters, 2, dim=1)
-        self.logvar = torch.clamp(self.logvar, -30.0, 20.0)
+        self.mean, log_var = torch.chunk(parameters, 2, dim=1)
+        self.log_var = torch.clamp(self.loglog_varvar, -30.0, 20.0)
         self.deterministic = deterministic
-        self.std = torch.exp(0.5 * self.logvar)
-        self.var = torch.exp(self.logvar)
+        self.std = torch.exp(0.5 * self.log_var)
+        self.var = torch.exp(self.log_var)
         if self.deterministic:
             self.var = self.std = torch.zeros_like(self.mean).to(device=self.parameters.device)
 
